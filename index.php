@@ -11,6 +11,7 @@ function authenticateGoogleClient($credentialsPath, $redirectUri) {
     $client = new Client();
     $client->setApplicationName('Gmail API PHP Script');
     $client->setScopes(Gmail::GMAIL_READONLY);
+    $client->addScope('https://www.googleapis.com/auth/spreadsheets');
     $client->setAuthConfig($credentialsPath);
     $client->setAccessType('offline');
     $client->setPrompt('select_account consent');

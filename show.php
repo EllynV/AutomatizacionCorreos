@@ -52,6 +52,23 @@ function getSheetsService($client)
     return new Google_Service_Sheets($client);
 }
 
+function getInterestedLabel($emailLabels, $labelName)
+{
+    foreach ($emailLabels as $label) {
+        if (str_starts_with($label, $labelName . "/")) {
+            // Prioridad: Retorna la parte después de $labelName . "/"
+            return substr($label, strlen($labelName . "/"));
+        }
+    }
+    
+    // Si no se encontró con "/", verificamos si existe una coincidencia exacta
+    foreach ($emailLabels as $label) {
+        if ($label === $labelName) {
+            return $label;
+        }
+    }
+}
+
 
 // Configuración
 $credentialsPath = 'credentials.json'; // Ruta al archivo JSON de credenciales
@@ -67,24 +84,34 @@ $client->addScope('https://www.googleapis.com/auth/spreadsheets');
 
 try {
     // Obtener el servicio de Gmail
-    $gmailService = getGmailService($client, $credentialsPath);
+    $gmailService = getGmailService($client);
     // Obtener el servicio de Sheets
-    $sheetsService = getSheetsService($client, $credentialsPath);
+    $sheetsService = getSheetsService($client);
 
+    /* echo '<pre style="font-family: calibri; font-size: 11px">';
     print_r($client->getAccessToken());
+    echo '</pre>'; */
+    
     // Obtener los mensajes
-    $messages = $gmailService->users_messages->listUsersMessages('me', ['maxResults' => 2]);
+    $messages = $gmailService->users_messages->listUsersMessages('me', ['maxResults' => 5]);
 
     $data = []; // Array para almacenar los datos extraídos
 
     $labels = $gmailService->users_labels->listUsersLabels('me');
+    $userLabels = [];
     foreach ($labels->getLabels() as $label) {
-        $labels[$label->getId()] = $label->getName();
-        echo "Etiqueta: " . $label->getName() . " (ID: " . $label->getId() . ")<br>";
+        $userLabels[$label->getId()] = $label->getName();
     }
+    /* echo '<pre style="font-family: calibri; font-size: 11px">';
+    print_r($userLabels);
+    echo '</pre>'; */
 
+    /* $interestedLabels = ['*Agentes', '*Prioridades'];
+    echo '<pre style="font-family: calibri; font-size: 11px">';
+    print_r($interestedLabels);
+    echo '</pre>'; */
 
-    echo "<h1>Correos electrónicos</h1>";
+    //echo "<h1>Correos electrónicos</h1>";
     foreach ($messages->getMessages() as $message) {
         $msg = $gmailService->users_messages->get('me', $message->getId());
         $headers = $msg->getPayload()->getHeaders();
@@ -97,20 +124,17 @@ try {
 
         $labelIds = $msg->getLabelIds();
 
-
         // Mapear IDs de etiquetas con sus nombres
-        echo "<h1>Etiquetas del correo</h1>";
+        //echo "<h1>Etiquetas del correo</h1>";
+        $emailLabels = [];
         foreach ($labelIds as $labelId) {
-            if (isset($labels[$labelId])) {
-                echo "Etiqueta: " . $labels[$labelId] . "<br>";
-
-                
-
-            } else {
-                echo "Etiqueta desconocida (ID: $labelId)<br>";
+            if (isset($userLabels[$labelId])) {
+                $emailLabels[] = $userLabels[$labelId];
             }
         }
-
+        /* echo '<pre style="font-family: calibri; font-size: 11px">';
+        print_r($emailLabels);
+        echo '</pre>'; */
 
         // Procesar los encabezados para obtener los detalles
         foreach ($headers as $header) {
@@ -122,53 +146,53 @@ try {
             }
             if ($header->getName() == 'Date') {
                 $date = new DateTime($header->getValue());
-                $receivedDate = $date->format('Y-m-d');
+                $receivedDate = $date->format('m-d-Y');
                 $receivedTime = $date->format('H:i:s');
             }
         }
 
         // Agregar los datos al arreglo
-        $data[] = [
+        $data['values'][] = [
             'Marca temporal' => $timestamp,
             'Correo electronico' => $from,
-            'Usuario Final' => '',
+            'Usuario Final' => NULL,
             'Fecha de recibido' => $receivedDate,
             'Hora de recibido' => $receivedTime,
-            'AGENTE' => '',
-            'Prioridad' => '',
-            'Nivel' => '',
-            'Nivel académico' => '',
-            'Programa académico' => '',
+            'AGENTE' => getInterestedLabel($emailLabels, '*Agentes'), //etiqueta
+            'Prioridad' => getInterestedLabel($emailLabels, '*Prioridades'), //etiqueta
+            'Nivel' => NULL, //etiqueta
+            'Nivel academico' => NULL,
+            'Programa academico' => NULL,
             'ASUNTO' => $subject,
-            'CREACIÓN DE USUARIOS' => '',
-            'NO PERTINENTE' => '',
-            'CANVAS	GOOGLE' => '',
-            'EXTENSIÓN' => '',
-            'EDUCATIC' => '',
-            'CERTIFICADOS' => '',
-            'PROVEEDORES' => '',
-            'PLATAFORMAS' => '',
-            'ATENCIÓN AL CIUDADANO' => '',
-            'Fecha de solución' => '',
-            'Hora de solución' => '',
-            'Canal de Ingreso' => '',
-            '¿Se envio Encuesta ?' => '',
-            'Hora de recibido' => '',
-            'Fecha total de inicio' => '',
-            'Fecha total de fin' => '',
-            'Total tiempo de Solución' => ''
+            'CREACION DE USUARIOS' => NULL, //etiqueta
+            'NO PERTINENTE' => NULL, //etiqueta
+            'CANVAS' => NULL, //etiqueta
+            'GOOGLE' => NULL, //etiqueta
+            'EXTENSION' => NULL,//etiqueta
+            'EDUCATIC' => NULL,//etiqueta
+            'CERTIFICADOS' => NULL,//etiqueta
+            'PROVEEDORES' => NULL,//etiqueta
+            'PLATAFORMAS' => NULL,//etiqueta
+            'ATENCION AL CIUDADANO' => NULL,
+            'Fecha de solucion' => NULL,
+            'Hora de solucion' => NULL,
+            'Canal de Ingreso' => NULL,
+            'Se envio Encuesta' => NULL,
+            'Hora de recibido' => NULL,
+            'Fecha total de inicio' => NULL,
+            'Fecha total de fin' => NULL,
+            'Total tiempo de Solucion' => NULL
         ];
     }
 
     // Imprimir los datos
-    echo '<pre>';
+    /* echo '<pre style="font-family: calibri; font-size: 11px">';
     print_r($data);
-    echo '</pre>';
-
-
+    echo '</pre>'; */
 
     // Crear el rango en el que insertar los datos
-    $range = 'Hoja1!A1'; // Cambia "Hoja1" al nombre de tu hoja
+    $range = 'Hoja1!A2';
+
     $body = new ValueRange([
         'values' => $data
     ]);
@@ -179,6 +203,7 @@ try {
 
     echo "Datos insertados correctamente en Google Sheets.";
 } catch (Exception $e) {
-    echo 'Error: ' . $e->getMessage();
+    echo '<pre style="font-family: calibri; font-size: 11px">';
+    print_r(json_decode($e->getMessage(), true));
+    echo '</pre>';
 }
-?>

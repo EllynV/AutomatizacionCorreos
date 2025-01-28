@@ -1,56 +1,22 @@
 <a href="index.php">Volver a cargar</a>
+
 <?php
 require 'vendor/autoload.php';
+require 'diasLaborales.php';
 
 use Google\Client;
-use Google\Service\Gmail;
-use Google\Service\Sheets;
-use Google\Service\Sheets as Google_Service_Sheets;
+use Google\Service\Gmail as Google_Service_Gmail;
 use Google\Service\Sheets\ValueRange;
-// Iniciar sesión
-session_start();
+use Google\Service\Sheets as Google_Service_Sheets;
 
-function getGmailService($client)
+
+function extractEmail($fromHeader)
 {
-
-    $client->setApplicationName('Gmail API PHP Script');
-
-    // Verificar si hay un código en la URL, intercambiarlo por un token
-    if (isset($_GET['code'])) {
-        $code = $_GET['code'];
-        $accessToken = $client->fetchAccessTokenWithAuthCode($code);
-
-        // Verificar si se obtuvo un token válido
-        if (isset($accessToken['access_token'])) {
-            $client->setAccessToken($accessToken);
-        } else {
-            echo json_encode($accessToken);
-            exit;
-        }
-    } else {
-        echo 'No se ha encontrado un código de autorización en la URL.';
-        exit;
-    }
-
-    // Si el token ha caducado o no existe, redirigir a la autenticación
-    if ($client->isAccessTokenExpired()) {
-        if ($client->getRefreshToken()) {
-            $client->fetchAccessTokenWithRefreshToken($client->getRefreshToken());
-        } else {
-            header('Location: index.php');
-            exit;
-        }
-    }
-
-    return new Gmail($client);
+    // Usar expresión regular para encontrar la dirección de correo
+    preg_match('/<([^>]+)>/', $fromHeader, $matches);
+    return isset($matches[1]) ? $matches[1] : $fromHeader; // Retorna solo el correo o la cadena original si no hay coincidencias
 }
 
-function getSheetsService($client)
-{
-    $client->setApplicationName('Google Sheets API PHP');
-
-    return new Google_Service_Sheets($client);
-}
 
 function getInterestedLabel($emailLabels, $labelName)
 {
@@ -58,7 +24,13 @@ function getInterestedLabel($emailLabels, $labelName)
     foreach ($emailLabels as $label) {
         if (str_starts_with($label, $labelName . "/")) {
             // Prioridad: Retorna la parte después de $labelName . "/"
-            $response = substr($label, strlen($labelName . "/"));
+            if( $response == "")    
+                $response = substr($label, strlen($labelName . "/"));
+            else
+                $response = $response . ', ' . substr($label, strlen($labelName . "/"));
+            
+                
+           // $response = substr($label, strlen($labelName . "/"));
         }
     }
 
@@ -72,204 +44,301 @@ function getInterestedLabel($emailLabels, $labelName)
     return $response;
 }
 
-function extractEmail($fromHeader)
+
+// Función para decodificar base64url
+function base64_url_decode($input)
 {
-    // Usar expresión regular para encontrar la dirección de correo
-    preg_match('/<([^>]+)>/', $fromHeader, $matches);
-    return isset($matches[1]) ? $matches[1] : $fromHeader; // Retorna solo el correo o la cadena original si no hay coincidencias
+    // Reemplazar los caracteres específicos para base64url
+    $base64 = strtr($input, '-_', '+/');
+    // Asegurarse de que el tamaño sea múltiplo de 4
+    $padding = strlen($base64) % 4;
+    if ($padding) {
+        $base64 .= str_repeat('=', 4 - $padding);
+    }
+    return base64_decode($base64);
+}
+
+function extractForwardedEmail($parts)
+{
+    foreach ($parts as $part) {
+        // Si la parte tiene un cuerpo, analizarlo
+        if (isset($part['body']) && isset($part['body']['data'])) {
+            $body = base64_url_decode($part['body']['data']);
+
+            // Buscar el correo original en un mensaje reenviado
+            $pattern = '/(De:|From:)\s+([^\r\n<]+)\s+<([^>]+)>/i';
+            if (preg_match($pattern, $body, $matches)) {
+                return trim($matches[3]); // Devuelve el correo del remitente original
+            }
+        }
+
+        // Si hay subpartes, analizarlas recursivamente
+        if (isset($part['parts'])) {
+            $email = extractForwardedEmail($part['parts']);
+            if ($email) {
+                return $email; // Devuelve el correo encontrado en subpartes
+            }
+        }
+    }
+    return null; // Si no se encontró ningún correo
 }
 
 
-
-// Configuración
-$credentialsPath = 'credentials.json'; // Ruta al archivo JSON de credenciales
-$spreadsheetId = '1xuQVC9zlxLRJriWlPG3Y7py_O_0gfO5RMVF1U0XdTZc'; //Contacto
-//$spreadsheetId = '13c8EjNZYI4Sq5wlQbvOTKVL4rLH_jXtsOxfrQrSAVMQ'; //ellyn.vasquez
-$startDate = '2025/01/24'; //YYYY/MM/DD
-$endDate = '2025/01/25'; //YYYY/MM/DD
-$miEmail = 'ellyn.vasquez@iudigital.edu.co';
-$canalesIngresoArray = ['contacto@iudigital.edu.co', 'soportecampus@iudigital.edu.co', 'atencionalciudadano@iudigital.edu.co'];
-$client = new Google_Client();
-$client->setAuthConfig($credentialsPath);
-$client->setAccessType('offline');
-$client->setPrompt('select_account consent');
-$client->addScope('https://www.googleapis.com/auth/gmail.readonly');
-$client->addScope('https://www.googleapis.com/auth/spreadsheets');
-$data = []; // Array para almacenar los datos extraídos
-try {
-    $gmailService = getGmailService($client);
-    $sheetsService = getSheetsService($client);
-    $processedMessages = [];
-    // Construir la consulta para mensajes leídos entre las fechas
-    $query = sprintf('label:read');
-    //$query = sprintf('label:read after:%s before:%s', $startDate, $endDate);
-
-    // Obtener los mensajes que coincidan con la consulta
-    $messages = $gmailService->users_messages->listUsersMessages('me', [
-        'q' => $query,    // Aplicar la consulta
-        'maxResults' => 200 // Número máximo de mensajes a obtener
-    ]);
-
-    $labels = $gmailService->users_labels->listUsersLabels('me');
+function listMessagesGroupedByThread($service)
+{
+    $messages = [];
     $userLabels = [];
+    $emailLabels = [];
+
+    $date = '2025/01/28'; //YYYY/MM/DD
+
+    // Ajustar la consulta para incluir correos del día completo
+    $query = sprintf('label:read label:inbox after:%s before:%s', $date, date('Y/m/d', strtotime($date . ' +1 day')));
+    $threads = $service->users_threads->listUsersThreads('me', ['q' =>  $query, 'maxResults' => 400])->getThreads();
+
+    $labels = $service->users_labels->listUsersLabels('me');
+
     foreach ($labels->getLabels() as $label) {
         $userLabels[$label->getId()] = $label->getName();
     }
 
-    foreach ($messages->getMessages() as $cont => $message) {
-        echo "Procesando mensaje " . ($cont + 1) . " de " . count($messages->getMessages()) . ' <br>';
-        $msg = $gmailService->users_messages->get('me', $message->getId());
-        // Obtener el ID del mensaje
-        //$messageId = $msg->getId();
+
+
+    if (empty($threads)) {
+        echo "No se encontraron mensajes.";
+        return;
+    }
+
+    foreach ($threads as $thread) {
+        $threadId = $thread->getId();
+        $threadDetails = $service->users_threads->get('me', $threadId);
 
 
 
+        $threadMessages = [];
+        foreach ($threadDetails->getMessages() as $message) {
+            $headers = $message->getPayload()->getHeaders();
+            $snippet = $message->getSnippet();
 
-        $threadId = $message->getThreadId();
 
+            // Obtener etiquetas del mensaje actual
+            $labelIds = $message->getLabelIds();
+            $emailLabels = []; // Reinicia las etiquetas para este mensaje
 
-        // Obtener todos los mensajes del hilo utilizando el threadId
-        $thread = $gmailService->users_threads->get('me', $threadId);
-        $firstMessage = null;
-        $from = $subject = $receivedDate = $receivedTime = "";
+            if (!empty($labelIds)) {
+                foreach ($labelIds as $labelId) {
+                    if (isset($userLabels[$labelId])) {
+                        $emailLabels[] = $userLabels[$labelId];
+                    }
+                }
+            }
 
-        // Iterar sobre los mensajes del hilo para encontrar el primero
-        foreach ($thread->getMessages() as $msgth) {
-            // Obtener el timestamp (fecha interna) del mensaje
-            $timestamp = $msgth->getInternalDate();
-
-            // Agregar cada mensaje con su fecha al array
-            $threadMessages[] = [
-                'message' => $msgth,
-                'timestamp' => $timestamp
+            $messageInfo = [
+                'id' => $message->getId(),
+                'snippet' => $snippet,
+                'labels' => $emailLabels,
+                'headers' => [],
+                'messageUrl' => "https://mail.google.com/mail/u/0/#inbox/" . $message->getId(),
+                'encuesta' => 'No'
             ];
-        }
-        // Ordenar los mensajes por fecha (internalDate) de manera ascendente
-        usort($threadMessages, function ($a, $b) {
-            return $a['timestamp'] <=> $b['timestamp']; // Ordenar de menor a mayor
-        });
 
-        $firstMessage = $threadMessages[0];
-        // Ahora $firstMessage contiene el primer correo del hilo
-        if ($firstMessage) {
-            // Extraer los detalles del primer correo
-            $msgth = $firstMessage['message'];
-            $headers = $msgth->getPayload()->getHeaders();
-            $messageId = $msgth->getId(); // ID del primer mensaje
-            $messageUrl = "https://mail.google.com/mail/u/0/#inbox/" . $messageId;
-            $specificUrl = 'https://docs.google.com/forms/d/e/1FAIpQLSc9Nl_BHQ9JdKF6W8LxJcGN9dk3WB7uD7aTtT6-2xFsV4wT7g/viewform';
-            // Verificar si el mensaje ya ha sido procesado (comprobando el messageId)
-            if (in_array($messageId, $processedMessages)) {
-                continue; // Si ya procesamos este mensaje, saltamos al siguiente
-            }
-
-            $processedMessages[] = $messageId;
-            echo '<pre>';
-            print_r($processedMessages);
-            echo '</pre>';
-
-            // Obtener los encabezados del primer mensaje
             foreach ($headers as $header) {
-               
-                // Buscar el campo "From"
-                if ($header->getName() == 'From') {
-                    $from = extractEmail($header->getValue());  // Obtiene el valor del encabezado "From"
-                }
-                // Buscar el campo "Subject"
-                if ($header->getName() == 'Subject') {
-                    $subject = $header->getValue();
+                if (in_array($header->getName(), ['Subject', 'From', 'Date'])) {
+                    $messageInfo['headers'][$header->getName()] = $header->getValue();
                 }
             }
 
-            $timestamp = $msgth->getInternalDate(); // Marca de tiempo en milisegundos
-            // Crear un objeto DateTime con la marca de tiempo
-            $dateTime = new DateTime();
-            $dateTime->setTimestamp($timestamp / 1000); // Convertir milisegundos a segundos
+            $dateTime = new DateTime($messageInfo['headers']['Date']); // Analizar la fecha y hora
 
-            // Establecer la zona horaria a la local (por ejemplo, Bogotá)
-            $dateTime->setTimezone(new DateTimeZone('America/Bogota'));
+            $messageInfo['headers']['receivedDate'] = $dateTime->format('Y-m-d'); // Formatear la fecha
+            $messageInfo['headers']['receivedTime']  = $dateTime->format('H:i:s'); // Formatear la hora
 
-            // Formatear la fecha y la hora
-            $receivedDate = $dateTime->format('Y-m-d'); // Fecha en formato AAAA-MM-DD
-            $receivedTime = $dateTime->format('H:i:s'); // Hora en formato HH:mm:ss
-            $FechaTotalInicio = $dateTime->format('Y-m-d H:i:s'); // Obtener solo la hora
+            $messageInfo['headers']['From'] = extractEmail($messageInfo['headers']['From']);
+            $canalesIngresoArray = ['contacto@iudigital.edu.co', 'soportecampus@iudigital.edu.co', 'atencionalciudadano@iudigital.edu.co'];
+
+            $messageInfo['headers']['canalIngreso']  = $canalesIngresoArray[0];
 
 
-            if (in_array($from, $canalesIngresoArray)) {
-                $canalIngreso = $from;
-            } else {
-                $canalIngreso = $canalesIngresoArray[0];
+
+            foreach ($message->getPayload()->getParts() as $part) {
+                if (isset($part['mimeType']) && ($part['mimeType'] == 'text/plain' || $part['mimeType'] == 'text/html')) {
+                    // Si es texto o HTML, decodificar el contenido
+                    $body = $part['body']['data'];
+                    $bodyDecoded = base64_url_decode($body);
+
+                    // Buscar si contiene la URL de Google Forms
+                    if (strpos($bodyDecoded, 'https://docs.google.com/forms') !== false) {
+                        // Si la URL se encuentra, hacer algo
+                        $messageInfo['encuesta'] = 'Sí';
+                        break;
+                        // echo "Se encontró una URL de Google Forms en el mensaje: $bodyDecoded<br/><br/>";
+                    }
+                }
             }
-            echo $from;
-            if ($from == 'atencionalciudadano@iudigital.edu.co') {
-               echo $originalBody = $msgth->getPayload()->getBody()->getData();
 
-               
+
+
+            if ($messageInfo['headers']['From'] == 'atencionalciudadano@iudigital.edu.co') {
+                echo $messageInfo['headers']['From'] . '---';
+
+                // Función recursiva para analizar todas las partes del mensaje
+
+                // Obtener las partes del mensaje y buscar el correo reenviado
+                $parts = $message->getPayload()->getParts();
+                $correoOriginal = extractForwardedEmail($parts);
+
+                if ($correoOriginal) {
+                    echo '**Correo Original: ' . $correoOriginal . '**<br>';
+                    $messageInfo['headers']['From'] = $correoOriginal;
+                } else {
+                    echo 'No se encontró el correo original en el cuerpo del mensaje.<br>';
+                }
+
+                echo $messageInfo['headers']['From'] . '<br>';
             }
+
+
+            $threadMessages[] = $messageInfo;
         }
 
+        $messages[] = [
+            'threadId' => $threadId,
+            'messages' => $threadMessages,
+        ];
+    }
 
-        // El último mensaje será el último en el array ordenado
-        $lastMessage = $threadMessages[count($threadMessages) - 1];
+    return $messages;
+}
 
-        // Obtener la fecha y hora del último mensaje
-        $lastTimestamp = $lastMessage['timestamp'];
-        $lastDateTime = new DateTime();
-        $lastDateTime->setTimestamp($lastTimestamp / 1000); // Convertir milisegundos a segundos
-        $lastDateTime->setTimezone(new DateTimeZone('America/Bogota')); // Ajustar a tu zona horaria
-        $FechaTotalFin = $lastDateTime->format('Y-m-d H:i:s'); // Obtener solo la hora
-        $fechaInicio = new DateTime($FechaTotalInicio);  // Convertir string a DateTime
-        $fechaFin = new DateTime($FechaTotalFin);        // Convertir string a DateTime
 
-        // Calcular la diferencia entre las fechas
-        $intervalo = $fechaInicio->diff($fechaFin);
-        $tiempoSolucion = $intervalo->format('%d días, %h:%i:%s');
+function getSheetsService($client)
+{
+    $client->setApplicationName('Google Sheets API PHP');
 
-        $labelIds = $msg->getLabelIds();
+    return new Google_Service_Sheets($client);
+}
 
-        // Mapear IDs de etiquetas con sus nombres
-        //echo "<h1>Etiquetas del correo</h1>";
-        $emailLabels = [];
-        foreach ($labelIds as $labelId) {
-            if (isset($userLabels[$labelId])) {
-                $emailLabels[] = $userLabels[$labelId];
+
+
+
+$client = new Google_Client();
+$client->setAuthConfig('credentials.json');
+$client->addScope(Google_Service_Gmail::GMAIL_READONLY);
+$client->addScope('https://www.googleapis.com/auth/spreadsheets');
+
+$spreadsheetId = '1xuQVC9zlxLRJriWlPG3Y7py_O_0gfO5RMVF1U0XdTZc'; //Contacto
+$client->setAccessType('offline');
+$client->setPrompt('select_account consent');
+$myEmail = 'contacto@iudigital.edu.co';
+$canalesIngresoArray = ['contacto@iudigital.edu.co', 'soportecampus@iudigital.edu.co', 'atencionalciudadano@iudigital.edu.co'];
+$sheetsService = getSheetsService($client);
+
+
+// Verificar si hay un código en la URL, intercambiarlo por un token
+if (isset($_GET['code'])) {
+    $code = $_GET['code'];
+    $accessToken = $client->fetchAccessTokenWithAuthCode($code);
+
+    // Verificar si se obtuvo un token válido
+    if (isset($accessToken['access_token'])) {
+        $client->setAccessToken($accessToken);
+    } else {
+        echo json_encode($accessToken);
+        exit;
+    }
+} else {
+    echo 'No se ha encontrado un código de autorización en la URL.';
+    exit;
+}
+
+
+$service = new Google_Service_Gmail($client);
+$threads = listMessagesGroupedByThread($service);
+
+// Mostrar los mensajes
+if ($threads) {
+    foreach ($threads as $thread) {
+
+        $encuesta = 'No';
+
+        echo "<h3>Hilo ID: {$thread['threadId']}</h3>";
+
+        foreach ($thread['messages'] as $message) {
+            if ($message['encuesta'] == 'Sí') {
+                $encuesta = 'Sí';
+                break;
             }
         }
 
         $currentTime = new DateTime();
         $currentTime->setTimezone(new DateTimeZone('America/Bogota'));
         $formattedDate = $currentTime->format('Y-m-d H:i:s');
+
+
+        $lastSentMessage = null;
+
+        foreach (array_reverse($thread['messages']) as $message) {
+            $headers = $message['headers'];
+
+            if (isset($headers['From']) && strpos($headers['From'], $myEmail) !== false) {
+                $lastSentMessage = $message;
+                break; // Sal del bucle en cuanto encuentres el último mensaje enviado por ti
+            }
+        }
+
+
+        // Obtener la fecha y hora del último mensaje
+        $lastDateTime = new DateTime($lastSentMessage['headers']['Date']); // Crear DateTime desde la cadena de fecha
+        $lastDateTime->setTimezone(new DateTimeZone('America/Bogota')); // Ajustar a tu zona horaria
+
+        $FechaTotalFin = $lastDateTime->format('Y-m-d H:i:s'); // Obtener solo la hora
+        $fechaInicio = new DateTime($thread['messages'][0]['headers']['Date']);  // Convertir string a DateTime
+        $fechaFin = new DateTime($FechaTotalFin); // Convertir string a DateTime
+
+        $fechaSolucion = $lastDateTime->format('Y-m-d'); // Formatear la fecha
+        $horaSolucion  = $lastDateTime->format('H:i:s'); // Formatear la hora
+
+        // Calcular la diferencia entre las fechas
+        $intervalo = $fechaInicio->diff($fechaFin);
+        $tiempoSolucion = calcularTiempoRespuesta($FechaTotalFin, $FechaTotalFin);
+
+
+        $formattedDateInicio = $fechaInicio->format('Y-m-d H:i:s');
+        echo $thread['messages'][0]['headers']['From'];
+        echo '<pre>';
+        print_r($thread['messages'][0]['labels']);
+        echo '</pre>';
         // Crear fila
         $row = [
             $formattedDate ?? "", //Current datetime
-            $from ?? "", //Correo electronico
-            $receivedDate ?? "", //Fecha de recibido
-            $receivedTime ?? "", //Hora de recibido
-            getInterestedLabel($emailLabels, '*Agente') ?? "", //AGENTE //etiqueta
-            getInterestedLabel($emailLabels, '*Prioridades') ?? "", //Prioridad //etiqueta
-            getInterestedLabel($emailLabels, '*Nivel') ?? "", //Nivel //etiqueta
+            $thread['messages'][0]['headers']['From'] ?? "", //Correo electronico
+            $thread['messages'][0]['headers']['receivedDate'] ?? "", //Fecha de recibido
+            $thread['messages'][0]['headers']['receivedTime'] ?? "", //Hora de recibido
+            getInterestedLabel($thread['messages'][0]['labels'], '*Agente') ?? "", //AGENTE //etiqueta
+            getInterestedLabel($thread['messages'][0]['labels'], '*Prioridades') ?? "", //Prioridad //etiqueta
+            getInterestedLabel($thread['messages'][0]['labels'], '*Nivel') ?? "", //Nivel //etiqueta
             $Nivelacademico  ?? "", //Nivel academico
             $ProgramaAcademico ?? "", //Programa academico
-            $subject ?? "", //ASUNTO
-            getInterestedLabel($emailLabels, '*Creación de Usuarios') ?? "", //CREACION DE USUARIOS //etiqueta
-            getInterestedLabel($emailLabels, '*No Pertinente') ?? "", //NO PERTINENTE //etiqueta
-            getInterestedLabel($emailLabels, '*Canvas') ?? "", //CANVAS //etiqueta
-            getInterestedLabel($emailLabels, '*GOOGLE') ?? "", //GOOGLE //etiqueta
-            getInterestedLabel($emailLabels, '*Extensión') ?? "", //EXTENSION//etiqueta
-            getInterestedLabel($emailLabels, '*EducaTIC') ?? "", //EDUCATIC//etiqueta
-            getInterestedLabel($emailLabels, '*Certificados') ?? "", //CERTIFICADOS//etiqueta
+            $thread['messages'][0]['headers']['Subject']  ?? "", //ASUNTO
+            getInterestedLabel($thread['messages'][0]['labels'], '*Creación de Usuarios') ?? "", //CREACION DE USUARIOS //etiqueta
+            getInterestedLabel($thread['messages'][0]['labels'], '*No Pertinente') ?? "", //NO PERTINENTE //etiqueta
+            getInterestedLabel($thread['messages'][0]['labels'], '*Canvas') ?? "", //CANVAS //etiqueta
+            getInterestedLabel($thread['messages'][0]['labels'], '*GOOGLE') ?? "", //GOOGLE //etiqueta
+            getInterestedLabel($thread['messages'][0]['labels'], '*Extensión') ?? "", //EXTENSION//etiqueta
+            getInterestedLabel($thread['messages'][0]['labels'], '*EducaTIC') ?? "", //EDUCATIC//etiqueta
+            getInterestedLabel($thread['messages'][0]['labels'], '*Certificados') ?? "", //CERTIFICADOS//etiqueta
             $proveedores ?? "", //PROVEEDORES//etiqueta
-            getInterestedLabel($emailLabels, '*Plataformas')  ?? "", //PLATAFORMAS//etiqueta
-            getInterestedLabel($emailLabels, '*Atención al Ciudadano') ?? "", //ATENCION AL CIUDADANO
+            getInterestedLabel($thread['messages'][0]['labels'], '*Plataformas')  ?? "", //PLATAFORMAS//etiqueta
+            getInterestedLabel($thread['messages'][0]['labels'], '*Atención al Ciudadano') ?? "", //ATENCION AL CIUDADANO
             $fechaSolucion ?? "", //Fecha de solucion
             $horaSolucion ?? "", //Hora de solucion
-            $canalIngreso ?? "", //Canal de Ingreso
+            $thread['messages'][0]['headers']['canalIngreso']  ?? "", //Canal de Ingreso
             $encuesta ?? "", //Se envio Encuesta
-            $receivedTime ?? "", //Hora de recibido
-            $FechaTotalInicio ?? "", //Fecha total de inicio
+            $thread['messages'][0]['headers']['receivedTime'] ?? "", //Hora de recibido
+            $formattedDateInicio  ?? "", //Fecha total de inicio
             $FechaTotalFin ?? "", //Fecha total de fin
             $tiempoSolucion ?? "", //Fecha total de fin
-            $messageUrl
+            $message['messageUrl']
         ];
 
         // Validar si la fila no está vacía
@@ -310,19 +379,15 @@ try {
         'Total tiempo de Solucion',
         'Url del correo'
     ];
+
     $data['values'] = array_merge([$headersTable], $data['values'] ?? []);
+
 
     // Crear el rango en Sheets
     $range = 'Hoja 1!A1';
     $body = new ValueRange(['values' => $data['values']]);
 
     $params = ['valueInputOption' => 'RAW'];
+
     $sheetsService->spreadsheets_values->update($spreadsheetId, $range, $body, $params);
-
-
-    echo "Datos insertados correctamente en Google Sheets.";
-} catch (Exception $e) {
-    echo '<pre style="font-family: calibri; font-size: 11px">';
-    print_r(json_decode($e->getMessage(), true));
-    echo '</pre>';
 }
